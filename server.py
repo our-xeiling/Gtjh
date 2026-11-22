@@ -52,7 +52,7 @@ MARK_TTL_SAFE = 2700
 
 def normalize(text):
     t = (text or "").lower()
-    t = t.replace("ё", "е").replace("ы", "и").replace("й", "і")
+    t = t.replace("ё", "е").replace("э", "е").replace("ы", "і").replace("и", "і").replace("й", "і").replace("ґ", "г")
     t = t.replace("ъ", "").replace("'", "").replace("’", "").replace("`", "")
     if re.search(r"[а-яіїєґ]", t):
         t = "".join(LATIN_TO_CYR.get(c, c) for c in t)
@@ -109,31 +109,138 @@ def is_noise(raw, norm):
 
 
 GEO_IDX = []
+STOP_GEO = {"с", "з", "і", "и", "в", "у", "к", "на", "до", "от", "из", "за", "по",
+            "пгт", "смт", "село", "селище", "раион", "область", "обл", "город", "города", "городу",
+            "трасса", "траса", "км", "год"}
+
+
+def _cp(a, b):
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
+def _dl_le1(a, b):
+    if a == b:
+        return True
+    if len(a) == len(b):
+        diff = [i for i, (x, y) in enumerate(zip(a, b)) if x != y]
+        if len(diff) == 1:
+            return True
+        return (len(diff) == 2 and diff[1] == diff[0] + 1
+                and a[diff[0]] == b[diff[1]] and a[diff[1]] == b[diff[0]])
+    if abs(len(a) - len(b)) != 1:
+        return False
+    if len(a) > len(b):
+        a, b = b, a
+    i = j = 0
+    skipped = False
+    while i < len(a) and j < len(b):
+        if a[i] == b[j]:
+            i += 1
+            j += 1
+        elif skipped:
+            return False
+        else:
+            skipped = True
+            j += 1
+    return True
+
+
+def _hit(tok, w):
+    if tok == w:
+        return True
+    if len(w) >= 4 and tok.startswith(w) and len(tok) - len(w) <= 4:
+        return True
+    if len(tok) >= 4 and w.startswith(tok) and len(w) - len(tok) <= 4:
+        return True
+    if len(w) >= 5 and _cp(tok, w) >= len(w) - 2 and abs(len(tok) - len(w)) <= 2:
+        return True
+    return False
+
+
+def _occ_hit(tok, w):
+    return tok == w or (len(w) >= 3 and tok.startswith(w) and len(tok) - len(w) <= 2)
+
+
+def _occ_phrase(tokens, i, words):
+    if i + len(words) > len(tokens):
+        return False
+    return all(tokens[i + k] == words[k] or _hit(tokens[i + k], words[k]) for k in range(len(words)))
+
+
+def _tokens(norm):
+    return re.findall(r"[а-щьюяіїєґa-z0-9\-]+", norm)
+
+
+def occupied_spans(tokens):
+    occ = set()
+    for key in ("напрямки", "статуси", "типи"):
+        for roots in (DICT.get(key) or {}).values():
+            for root in roots or []:
+                words = normalize(root).split()
+                if not words:
+                    continue
+                if len(words) == 1:
+                    w = words[0]
+                    if key != "напрямки" and len(w) < 4:
+                        continue
+                    for i, tok in enumerate(tokens):
+                        if _occ_hit(tok, w):
+                            occ.add(i)
+                else:
+                    n = len(words)
+                    for i in range(len(tokens) - n + 1):
+                        if _occ_phrase(tokens, i, words):
+                            for k in range(n):
+                                occ.add(i + k)
+    return occ
 
 
 def build_geo():
     for p in PLACES:
         for a in [p.get("name", "")] + p.get("aliases", []):
-            if a:
-                GEO_IDX.append((normalize(a), p))
-    GEO_IDX.sort(key=lambda x: -len(x[0]))
+            na = normalize(a)
+            if na:
+                GEO_IDX.append((tuple(na.split()), p))
+    GEO_IDX.sort(key=lambda x: (-len(x[0]), -max(len(w) for w in x[0])))
 
 
 build_geo()
 
 
-def geo_match(norm):
-    used = [False] * len(norm)
+def geo_match(tokens, occupied=None):
+    occupied = occupied or set()
+    ok = [i for i, t in enumerate(tokens)
+          if t not in STOP_GEO and i not in occupied]
     found = []
-    for alias, place in GEO_IDX:
-        pos = norm.find(alias)
-        while pos >= 0:
-            if not any(used[pos:pos + len(alias)]):
-                for i in range(pos, pos + len(alias)):
-                    used[i] = True
-                found.append((pos, place))
+    for words, place in GEO_IDX:
+        n = len(words)
+        for i in ok:
+            if i + n > len(tokens) or any((i + k) in occupied for k in range(n)):
+                continue
+            if all(_hit(tokens[i + k], words[k]) for k in range(n)):
+                found.append((i, n, place))
                 break
-            pos = norm.find(alias, pos + 1)
+    if not found:
+        for i in ok:
+            tok = tokens[i]
+            if len(tok) < 6:
+                continue
+            for words, place in GEO_IDX:
+                if len(words) == 1 and len(words[0]) >= 6 and _dl_le1(tok, words[0]):
+                    found.append((i, 1, place))
+                    break
+    found.sort(key=lambda x: (x[0], -x[1]))
+    out, seen = [], set()
+    for _, _, p in found:
+        if p.get("name") not in seen:
+            seen.add(p.get("name"))
+            out.append(p)
+    return out[:6]
     found.sort(key=lambda x: x[0])
     out, seen = [], set()
     for _, p in found:
@@ -154,13 +261,21 @@ def parse_message(raw, channel, ts):
     n = normalize(raw)
     if is_noise(raw, n):
         return None
-    if "тривог" in n or "тревог" in n or "трiвог" in n:
+    toks = _tokens(n)
+    occ = occupied_spans(toks)
+    if "трівог" in n or "тревог" in n:
         rl = (raw or "").lower()
-        off = ("відбій" in rl or "отбой" in rl or "🟢" in raw or "зелен" in n)
-        return {"kind": "alert_echo", "channel": channel, "raw": raw, "time": ts,
+        off = ("відбій" in rl or "отбой" in rl or "\U0001F7E2" in raw or "зелен" in n)
+        echo = {"kind": "alert_echo", "channel": channel, "raw": raw, "time": ts,
                 "text": raw, "alert_on": not off}
-    places = geo_match(n)
-    m = re.search(r"\+\s?(\d)|(\d)х", raw)
+        ep = geo_match(toks, occ)
+        echo["places"] = [p.get("name") for p in ep]
+        echo["coords"] = [(p["lat"], p["lon"]) for p in ep]
+        return echo
+    places = geo_match(toks, occ)
+    if any(not pl.get("rajon") for pl in places):
+        places = [pl for pl in places if not pl.get("rajon")]
+    m = re.search(r"\+\s?(\d{1,2})|(\d{1,2})\s?[хx](?=$|[\s,.;])", raw)
     ma = re.search(r"(висот|высот)[^0-9]{0,24}(\d{2,5})", n)
     return {
         "kind": "target" if places else "feed",
