@@ -571,8 +571,8 @@ def poll_channels_fallback():
 
 LLM_CFG = {}
 LLM_CACHE = {}
-LLM_DEFAULTS = {"api_url": "https://api.mistral.ai/v1/chat/completions",
-                "api_key": "", "model": "mistral-small-latest"}
+LLM_DEFAULTS = {"api_url": "https://api.groq.com/openai/v1/chat/completions",
+                "api_key": "", "model": "llama-3.3-70b-versatile"}
 
 
 def _llm_user(raw, ctx=()):
