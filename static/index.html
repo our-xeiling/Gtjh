@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Карта загроз — Дніпропетровщина</title>
+<style>
+  :root {
+    --bg: #10161f;
+    --panel: #182029;
+    --text: #e8eaed;
+    --muted: #9aa0a6;
+    --border: #2a313c;
+    --area-line: #3d8b40;
+    --river: #3d7fd4;
+    --road: #5a626c;
+    --rail: #585f69;
+    --city-dot: #cfd8dc;
+    --city-label: #b8c4cc;
+  }
+  body.light {
+    --bg: #eef2f4;
+    --panel: #ffffff;
+    --text: #1a1c1e;
+    --muted: #5f6368;
+    --border: #d0d5da;
+    --area-line: #2e7d32;
+    --river: #1976d2;
+    --road: #9aa1a9;
+    --rail: #9aa1a9;
+    --city-dot: #455a64;
+    --city-label: #37474f;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { font-family: 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--border); z-index: 1000; }
+  header h1 { font-size: 15px; font-weight: 600; flex: 1; }
+  #alert-badge { font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 12px; background: #43a047; color: #fff; }
+  #alert-badge.on { background: #e53935; animation: pulse 1.5s infinite; }
+  @keyframes pulse { 50% { opacity: 0.55; } }
+  #theme-btn { background: var(--border); color: var(--text); border: none; border-radius: 8px; padding: 6px 10px; font-size: 14px; }
+  #legend { display: flex; gap: 12px; flex-wrap: wrap; padding: 6px 12px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 11px; color: var(--muted); z-index: 1000; }
+  #legend span { display: inline-flex; align-items: center; gap: 4px; }
+  .lgmk { display: inline-block; width: 14px; height: 14px; line-height: 13px; text-align: center; font: 700 13px/13px monospace; }
+  .lgmk.red { color: #ff1744; }
+  .lgmk.yellow { color: #ffd400; }
+  .lgmk.gray { color: #9e9e9e; }
+  #map { flex: 1; min-height: 0; position: relative; background: var(--bg); }
+  #map canvas { width: 100%; height: 100%; display: block; }
+  #map.error:after {
+    content: attr(data-err);
+    position: absolute; left: 50%; top: 50%;
+    transform: translate(-50%,-50%);
+    background: var(--panel); color: #ef5350;
+    padding: 10px 14px; border: 1px solid var(--border);
+    border-radius: 8px; font-size: 13px; max-width: 92%;
+    text-align: center; z-index: 2000;
+  }
+  #updated { font-size: 10px; color: var(--muted); padding: 3px 12px; background: var(--panel); border-top: 1px solid var(--border); }
+  #feed { height: 160px; overflow-y: auto; background: var(--panel); border-top: 1px solid var(--border); padding: 6px 12px; z-index: 1000; }
+  #feed h2 { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  #feed .item { font-size: 12.5px; line-height: 1.45; padding: 3px 0; border-bottom: 1px solid var(--border); }
+  #feed .item .meta { color: var(--muted); font-size: 10.5px; }
+  #feed .item.noise { opacity: 0.45; }
+  #feed .item.alert { color: #ef5350; font-weight: 600; }
+  .plus { width: 24px; height: 24px; font: 700 22px/22px 'Courier New', monospace; text-align: center; cursor: pointer; text-shadow: 0 0 3px rgba(0,0,0,.9); }
+  .qmark { width: 24px; height: 24px; font: 700 19px/23px Georgia, serif; text-align: center; cursor: pointer; text-shadow: 0 0 3px rgba(0,0,0,.9); }
+  .red { color: #ff1744; }
+  .yellow { color: #ffd400; }
+  .gray { color: #9e9e9e; opacity: .6; }
+  .city-label { background: transparent; border: none; box-shadow: none; font-size: 10px; color: var(--city-label); text-shadow: 0 0 2px var(--bg); padding: 0; }
+  .cbtns { position: absolute; right: 8px; top: 8px; z-index: 1500; flex-direction: column; gap: 4px; display: none; }
+  .cbtns button { width: 34px; height: 34px; border: 1px solid var(--border); background: var(--panel); color: var(--text); border-radius: 6px; font-size: 18px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Карта загроз — Дніпропетровщина</h1>
+  <span id="alert-badge">Спокій</span>
+  <button id="theme-btn" title="Тема">☀</button>
+</header>
+<div id="legend">
+  <span><i class="lgmk yellow">+</i>Без прямої загрози містам</span>
+  <span><i class="lgmk red">+</i>Загроза великим містам</span>
+  <span><i class="lgmk red">?</i>Невідома ціль</span>
+  <span><i class="lgmk gray">+</i>Ціль пропала</span>
+</div>
+<div id="map" data-err=""><div class="cbtns" id="cbtns"><button id="zin">+</button><button id="zout">−</button></div></div>
+<div id="updated">Оновлюється…</div>
+<div id="feed"><h2>Останні повідомлення</h2><div id="feed-items"></div></div>
+
+<script src="dnipro-geo.js"></script>
+<script src="rivers.js"></script>
+<script>
+var LEAFLET_BASES = [
+  "https://unpkg.com/leaflet@1.9.4/dist/",
+  "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/",
+  "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/"
+];
+function loadWithFallback(bases, cssName, jsName, done, fail) {
+  var i = 0;
+  function next() {
+    if (i >= bases.length) { fail(); return; }
+    var base = bases[i++];
+    var link = document.createElement("link");
+    link.rel = "stylesheet"; link.href = base + cssName;
+    document.head.appendChild(link);
+    var s = document.createElement("script");
+    s.src = base + jsName;
+    s.onload = function () { if (window.L) done(base); else next(); };
+    s.onerror = function () { next(); };
+    document.head.appendChild(s);
+  }
+  next();
+}
+
+var CHANNEL_UK = {
+  dnepr_nagladach: "Наглядач Дніпра",
+  eyes_everywhere_dnipro: "Очі Всюди",
+  PmSDnepra: "ПмС",
+  TesterbotTrevoga: "Тест"
+};
+var STATUS_UK = {
+  detected: "Зафіксовано", tracked: "Курс", transit: "Транзит",
+  approach: "Наближення", overhead: "Над вами", loiter: "Циркулює",
+  lost: "Пропав", redetected: "Знову виявлений", left: "Пішов",
+  no_threat: "Без загроз", all_clear: "Відбій", unknown: "Ціль"
+};
+var FALLBACK_RING = [[48.80,33.65],[48.83,34.10],[48.78,34.75],[48.86,35.20],[48.90,35.55],
+  [48.75,36.10],[48.60,36.25],[48.30,36.25],[47.95,36.30],[47.70,36.05],
+  [47.45,35.85],[47.35,35.40],[47.45,34.85],[47.55,34.45],[47.45,34.10],
+  [47.70,33.95],[47.70,33.55],[47.95,33.30],[48.10,33.30],[48.30,33.45],
+  [48.45,33.55],[48.60,33.60]];
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function fmtTime(sec) {
+  if (!sec) return "";
+  var d = new Date(sec * 1000);
+  return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
+}
+function trackLabel(t) {
+  return [
+    t.type === "ціль" ? "?" : (t.type || "").toUpperCase(),
+    t.count ? t.count + "x" : null,
+    (t.locations && t.locations.length ? t.locations[t.locations.length - 1].name : null),
+    STATUS_UK[t.status] || t.status,
+    t.altitude_m ? t.altitude_m + " м" : null,
+    t.pattern ? "циркулює" : null,
+    fmtTime(t.last_update)
+  ].filter(Boolean).join(" · ");
+}
+
+var mapApi = null;
+
+function cssVar(name, def) {
+  var v = getComputedStyle(document.body).getPropertyValue(name).trim();
+  return v || def;
+}
+
+function renderState(state) {
+  if (!state || !Array.isArray(state.tracks)) state = { tracks: [], feed: [], alerts: {}, updated: Math.floor(Date.now() / 1000) };
+  var alertOn = !!(state.alerts && state.alerts.state === "on");
+  var badge = document.getElementById("alert-badge");
+  badge.textContent = alertOn ? "ТРИВОГА" : "Спокій";
+  badge.classList.toggle("on", alertOn);
+
+  mapApi.render(state, alertOn);
+
+  var srcLine = "";
+  if (state.sources && state.sources.length) {
+    var okN = state.sources.filter(function (s) { return s.ok; }).length;
+    srcLine = " · джерела: " + okN + "/" + state.sources.length;
+  }
+  document.getElementById("updated").textContent =
+    "Оновлено: " + new Date((state.updated || Math.floor(Date.now() / 1000)) * 1000).toLocaleTimeString("uk-UA") + srcLine;
+
+  var items = (state.feed || []).slice().reverse();
+  document.getElementById("feed-items").innerHTML = items.map(function (f) {
+    var cls = f.kind === "noise" ? "noise" : (f.kind === "alert_echo" ? "alert" : "");
+    return "<div class='item " + cls + "'><span class='meta'>" + esc(fmtTime(+f.time)) +
+      " · " + esc(CHANNEL_UK[f.channel] || f.channel) + "</span><br>" + esc(f.text) + "</div>";
+  }).join("");
+}
+
+/* Leaflet: чистая векторная карта, без тайлов */
+function initLeaflet() {
+  var map = L.map("map", { renderer: L.svg(), zoomControl: true }).setView([48.35, 35.05], 8);
+
+  var rings = (window.OBLAST_GEO && window.OBLAST_GEO.length) ? window.OBLAST_GEO : [FALLBACK_RING];
+  var areaLayer = L.layerGroup().addTo(map);
+  var vectorLayer = L.layerGroup().addTo(map);
+  var citiesLayer = L.layerGroup().addTo(map);
+  var tracksLayer = L.layerGroup().addTo(map);
+
+  function styleArea(alertOn) {
+    return { color: alertOn ? "#e53935" : cssVar("--area-line", "#3d8b40"), weight: alertOn ? 3 : 2,
+             fillColor: alertOn ? "#e53935" : cssVar("--area-line", "#3d8b40"), fillOpacity: alertOn ? 0.16 : 0.10, opacity: 1 };
+  }
+
+  rings.forEach(function (r) {
+    L.polygon(r, styleArea(false)).addTo(areaLayer).bindTooltip("Дніпропетровська область");
+  });
+
+  function drawVectors() {
+    vectorLayer.clearLayers();
+    citiesLayer.clearLayers();
+    var riverC = cssVar("--river", "#3d7fd4"), roadC = cssVar("--road", "#5a626c"),
+        railC = cssVar("--rail", "#585f69"), dotC = cssVar("--city-dot", "#cfd8dc");
+    (window.RIVERS || []).forEach(function (f) {
+      L.polyline(f.pts, { color: riverC, weight: f.w, opacity: 0.8 })
+        .bindTooltip(f.name, { sticky: true }).addTo(vectorLayer);
+    });
+    (window.ROADS || []).forEach(function (f) {
+      L.polyline(f.pts, { color: roadC, weight: f.w * 0.25, opacity: 0.7 })
+        .bindTooltip(f.name, { sticky: true }).addTo(vectorLayer);
+    });
+    (window.RAILS || []).forEach(function (f) {
+      L.polyline(f.pts, { color: railC, weight: f.w, opacity: 0.7, dashArray: "6 3" }).addTo(vectorLayer);
+    });
+    (window.CITIES || []).forEach(function (c) {
+      var radius = c.size >= 3 ? 5 : (c.size === 2 ? 3.5 : 2);
+      var m = L.circleMarker([c.lat, c.lon], { color: dotC, weight: 1.2, fillColor: dotC, fillOpacity: 0.9, radius: radius }).addTo(citiesLayer);
+      m.bindTooltip(c.name, {
+        permanent: c.size >= 2, direction: "right", className: "city-label", offset: [4, 0]
+      });
+    });
+  }
+  drawVectors();
+
+  var currentAlert = false;
+  document.getElementById("theme-btn").addEventListener("click", function () {
+    document.body.classList.toggle("light");
+    document.getElementById("theme-btn").textContent = document.body.classList.contains("light") ? "🌙" : "☀";
+    areaLayer.eachLayer(function (l) { l.setStyle(styleArea(currentAlert)); });
+    drawVectors();
+  });
+
+  try { map.fitBounds(L.latLngBounds(rings[0]), { padding: [8, 8] }); } catch (e) {}
+
+  return {
+    render: function (state, alertOn) {
+      if (alertOn !== currentAlert) {
+        currentAlert = alertOn;
+        areaLayer.eachLayer(function (l) { l.setStyle(styleArea(alertOn)); });
+      }
+      tracksLayer.clearLayers();
+      (state.tracks || []).forEach(function (t) {
+        var cls = t.color || "yellow";
+        var color = cls === "red" ? "#ff1744" : (cls === "gray" ? "#9e9e9e" : "#ffd400");
+        var last = t.locations && t.locations.length ? t.locations[t.locations.length - 1] : null;
+        if (!last) return;
+        if (t.locations.length > 1) {
+          L.polyline(t.locations.map(function (l) { return [l.lat, l.lon]; }), {
+            color: color, weight: 2, opacity: 0.6,
+            dashArray: (t.status === "lost" || t.status === "left") ? "4 6" : null
+          }).addTo(tracksLayer);
+        }
+        var glyph = t.marker === "?"
+          ? "<div class='qmark red'>?</div>"
+          : "<div class='plus " + cls + "'>+</div>";
+        var m = L.marker([last.lat, last.lon], {
+          icon: L.divIcon({ className: "", html: glyph, iconSize: [24, 24], iconAnchor: [12, 12] })
+        }).addTo(tracksLayer);
+        var label = trackLabel(t);
+        m.bindTooltip(label, { direction: "top" });
+        m.bindPopup("<b>" + esc(label) + "</b><br><small>" + esc(t.last_text) + "</small>" +
+          "<br><small style='opacity:.6'>" + esc(CHANNEL_UK[t.channel] || t.channel) + "</small>");
+        if (t.heading && (t.status === "tracked" || t.status === "detected" || t.status === "approach")) {
+          var arrow = { N: [-0.35, 0], S: [0.35, 0], E: [0, 0.5], W: [0, -0.5] }[t.heading];
+          if (arrow) {
+            L.polyline([[last.lat, last.lon], [last.lat + arrow[0], last.lon + arrow[1]]], {
+              color: color, weight: 2, opacity: 0.8, dashArray: "2 6"
+            }).addTo(tracksLayer);
+          }
+        }
+      });
+    }
+  };
+}
+
+/* Канвас-фолбэк (без Leaflet) */
+function initCanvas() {
+  document.getElementById("cbtns").style.display = "flex";
+  var wrap = document.getElementById("map");
+  var cv = document.createElement("canvas");
+  wrap.insertBefore(cv, wrap.firstChild);
+  var ctx = cv.getContext("2d");
+  var rings = (window.OBLAST_GEO && window.OBLAST_GEO.length) ? window.OBLAST_GEO : [FALLBACK_RING];
+  var K0 = Math.cos(48.3 * Math.PI / 180), SC = 2000, cx = 35.05, cy = 48.35;
+  var drag = null, state = null, alertOn = false;
+
+  function fit() {
+    var minLa = 99, maxLa = -99, minLo = 99, maxLo = -99;
+    rings.forEach(function (r) { r.forEach(function (p) {
+      if (p[0] < minLa) minLa = p[0]; if (p[0] > maxLa) maxLa = p[0];
+      if (p[1] < minLo) minLo = p[1]; if (p[1] > maxLo) maxLo = p[1]; }); });
+    var r = wrap.getBoundingClientRect();
+    SC = Math.min(Math.max(r.width, 100) / ((maxLo - minLo) * K0), Math.max(r.height, 100) / (maxLa - minLa)) * 0.88;
+    cx = (minLo + maxLo) / 2; cy = (minLa + maxLa) / 2;
+  }
+  function proj(lat, lon) {
+    return [(lon - cx) * K0 * SC + cv.width / 2, (cy - lat) * SC + cv.height / 2];
+  }
+  function drawLine(pts, color, w, dash) {
+    ctx.beginPath();
+    pts.forEach(function (p, i) {
+      var pt = proj(p[0], p[1]);
+      if (i === 0) ctx.moveTo(pt[0], pt[1]); else ctx.lineTo(pt[0], pt[1]);
+    });
+    ctx.strokeStyle = color; ctx.lineWidth = w; ctx.setLineDash(dash || []);
+    ctx.stroke(); ctx.setLineDash([]);
+  }
+  function draw() {
+    var dpr = window.devicePixelRatio || 1;
+    var light = document.body.classList.contains("light");
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = light ? "#eef2f4" : "#10161f";
+    ctx.fillRect(0, 0, cv.width, cv.height);
+    var oc = alertOn ? "#e53935" : cssVar("--area-line", "#3d8b40");
+    rings.forEach(function (r) {
+      ctx.beginPath();
+      r.forEach(function (p, i) {
+        var pt = proj(p[0], p[1]);
+        if (i === 0) ctx.moveTo(pt[0], pt[1]); else ctx.lineTo(pt[0], pt[1]);
+      });
+      ctx.closePath();
+      ctx.fillStyle = oc; ctx.globalAlpha = alertOn ? 0.18 : 0.10; ctx.fill(); ctx.globalAlpha = 1;
+      ctx.strokeStyle = oc; ctx.lineWidth = (alertOn ? 3 : 2) * dpr; ctx.stroke();
+    });
+    var riverC = cssVar("--river", "#3d7fd4"), roadC = cssVar("--road", "#5a626c"),
+        railC = cssVar("--rail", "#585f69"), dotC = cssVar("--city-dot", "#cfd8dc");
+    (window.RIVERS || []).forEach(function (f) { drawLine(f.pts, riverC, f.w * dpr, null); });
+    (window.ROADS || []).forEach(function (f) { drawLine(f.pts, roadC, f.w * dpr, null); });
+    (window.RAILS || []).forEach(function (f) { drawLine(f.pts, railC, f.w * dpr, [6 * dpr, 3 * dpr]); });
+    ctx.font = (10 * dpr) + "px sans-serif";
+    ctx.textAlign = "left";
+    (window.CITIES || []).forEach(function (c) {
+      var pt = proj(c.lat, c.lon);
+      ctx.fillStyle = dotC;
+      ctx.beginPath(); ctx.arc(pt[0], pt[1], (c.size >= 3 ? 4 : c.size === 2 ? 3 : 2) * dpr, 0, 7); ctx.fill();
+      if (c.size >= 2) { ctx.fillStyle = cssVar("--city-label", "#b8c4cc"); ctx.fillText(c.name, pt[0] + 6, pt[1] + 3); }
+    });
+    if (state) (state.tracks || []).forEach(function (t) {
+      var cls = t.color || "yellow";
+      var color = cls === "red" ? "#ff1744" : (cls === "gray" ? "#9e9e9e" : "#ffd400");
+      var last = t.locations && t.locations.length ? t.locations[t.locations.length - 1] : null;
+      if (!last) return;
+      if (t.locations.length > 1) drawLine(t.locations.map(function (l) { return [l.lat, l.lon]; }), color, 2 * dpr, (t.status === "lost" || t.status === "left") ? [4, 6] : null);
+      var pt = proj(last.lat, last.lon);
+      ctx.font = (22 * dpr) + "px 'Courier New', monospace";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.globalAlpha = cls === "gray" ? 0.6 : 1;
+      ctx.fillStyle = color;
+      ctx.fillText(t.marker === "?" ? "?" : "+", pt[0], pt[1]);
+      ctx.globalAlpha = 1;
+      ctx.font = (10 * dpr) + "px sans-serif";
+      ctx.fillStyle = light ? "#5f6368" : "#9aa0a6";
+      ctx.fillText(last.name || "", pt[0], pt[1] + 16 * dpr);
+    });
+  }
+  function resize() {
+    var r = wrap.getBoundingClientRect(), dprv = window.devicePixelRatio || 1;
+    cv.width = Math.max(r.width, 10) * dprv; cv.height = Math.max(r.height, 10) * dprv;
+    draw();
+  }
+  cv.addEventListener("pointerdown", function (e) { drag = { x: e.clientX, y: e.clientY, cx: cx, cy: cy }; });
+  window.addEventListener("pointermove", function (e) {
+    if (!drag) return;
+    cx = drag.cx - (e.clientX - drag.x) / (K0 * SC);
+    cy = drag.cy + (e.clientY - drag.y) / SC;
+    draw();
+  });
+  window.addEventListener("pointerup", function () { drag = null; });
+  wrap.addEventListener("wheel", function (e) { e.preventDefault(); SC *= (e.deltaY < 0 ? 1.25 : 0.8); draw(); }, { passive: false });
+  document.getElementById("zin").onclick = function () { SC *= 1.35; draw(); };
+  document.getElementById("zout").onclick = function () { SC /= 1.35; draw(); };
+  document.getElementById("theme-btn").onclick = function () {
+    document.body.classList.toggle("light");
+    document.getElementById("theme-btn").textContent = document.body.classList.contains("light") ? "🌙" : "☀";
+    draw();
+  };
+  window.addEventListener("resize", resize);
+  fit(); resize();
+  return { render: function (s, a) { state = s; alertOn = a; draw(); } };
+}
+
+function parseSafe(txt) {
+  try { var s = JSON.parse(txt); return (s && Array.isArray(s.tracks)) ? s : null; }
+  catch (e) { return null; }
+}
+function printErr(msg) {
+  var m = document.getElementById("map");
+  m.classList.add("error"); m.setAttribute("data-err", msg);
+}
+async function tick() {
+  try {
+    var r = await fetch("state.json?_=" + Date.now(), { cache: "no-store" });
+    var s = parseSafe(await r.text());
+    if (!s) throw new Error("state.json пуст");
+    renderState(s);
+  } catch (e) { printErr("Сервер недоступний: " + e.message); }
+}
+
+async function boot() {
+  if (window.L) { start(); return; }
+  loadWithFallback(LEAFLET_BASES, "leaflet.css", "leaflet.js",
+    function () { start(); },
+    function () { printErr("Leaflet не завантажився — увімкнено резервну канвас-карту"); start(); }
+  );
+}
+function start() { mapApi = window.L ? initLeaflet() : initCanvas(); tick(); setInterval(tick, 3000); }
+boot();
+</script>
+</body>
+</html>

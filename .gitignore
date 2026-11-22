@@ -8,3 +8,7 @@ captures/
 .externalNativeBuild/
 .cxx/
 __pycache__/
+config.json
+tg_session*
+__pycache__/
+*.pyc
