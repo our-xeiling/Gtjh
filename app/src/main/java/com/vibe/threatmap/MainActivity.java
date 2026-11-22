@@ -65,8 +65,8 @@ public class MainActivity extends Activity {
         web.addJavascriptInterface(new Bridge(), "Android");
         web.loadUrl("file:///android_asset/index.html");
 
-        ui.postDelayed(this::pollChannel, CHANNEL_INTERVAL_MS);
-        ui.postDelayed(this::pollAlert, ALERT_INTERVAL_MS);
+        ui.post(this::pollChannel);
+        ui.post(this::pollAlert);
     }
 
     private void pollChannel() {

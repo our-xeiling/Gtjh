@@ -125,6 +125,8 @@
 <div id="feed"><h2>Останні повідомлення</h2><div id="feed-items"></div></div>
 
 <script src="dnipro-geo.js"></script>
+<script src="data-dict.js"></script>
+<script src="pipeline.js"></script>
 <script>
 /* CDN-незалежне завантаження Leaflet (3 дзеркала) */
 var LEAFLET_BASES = [
@@ -233,6 +235,17 @@ function renderState(state) {
   document.getElementById("updated").textContent =
     "Оновлено: " + new Date((state.updated || Math.floor(Date.now() / 1000)) * 1000).toLocaleTimeString("uk-UA") +
     " · джерело: " + (window.__dataMode || "демо");
+
+  var srcLine = "";
+  if (state.sources && state.sources.length) {
+    var okN = state.sources.filter(function (s) { return s.ok; }).length;
+    var errN = state.sources.filter(function (s) { return !s.ok; }).length;
+    srcLine = " · джерела: " + okN + "/" + state.sources.length + " працюють" +
+      (errN ? " (" + errN + " з помилкою)" : "");
+  }
+  document.getElementById("updated").textContent =
+    "Оновлено: " + new Date((state.updated || Math.floor(Date.now() / 1000)) * 1000).toLocaleTimeString("uk-UA") +
+    " · джерело: " + (window.__dataMode || "демо") + srcLine;
 
   var items = (state.feed || []).slice().reverse();
   document.getElementById("feed-items").innerHTML = items.map(function (f) {
@@ -440,9 +453,13 @@ async function getState() {
     try {
       var r = await fetch("state.json?_=" + Date.now(), { cache: "no-store" });
       var s2 = parseSafe(await r.text());
-      window.__dataMode = s2 ? "сервер Termux" : "сервер (дані недоступні → демо)";
-      return s2 || demoState();
-    } catch (e) { window.__dataMode = "сервер (дані недоступні → демо)"; return demoState(); }
+      if (s2) { window.__dataMode = "сервер Termux"; return s2; }
+    } catch (e) {}
+  }
+  if (window.__pipelineStart) {
+    window.__pipelineStart();
+    window.__dataMode = "напряму з t.me (браузер)";
+    return window.__pipelineState();
   }
   window.__dataMode = "демо";
   return demoState();

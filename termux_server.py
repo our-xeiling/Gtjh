@@ -247,6 +247,7 @@ class State:
         self.feed = []
         self.alert_state = ""
         self.updated = int(time.time())
+        self.sources = {}
 
     def snapshot(self):
         with self.lock:
@@ -255,6 +256,10 @@ class State:
                 "alerts": {"state": self.alert_state, "updated": self.updated},
                 "tracks": list(self.tracks.tracks),
                 "feed": list(self.feed)[-40:],
+                "sources": [
+                    {"name": k, "ok": v["ok"], "err": v["err"], "time": v["time"]}
+                    for k, v in list(self.sources.items())
+                ],
             }
 
 
@@ -309,6 +314,9 @@ def poll_channels():
                 STATE.tracks.prune()
             except Exception as e:
                 print("poll %s: %s" % (ch, e), file=sys.stderr)
+                STATE.sources[ch] = {"ok": False, "err": str(e)[:120], "time": int(time.time())}
+            else:
+                STATE.sources[ch] = {"ok": True, "err": "", "time": int(time.time())}
         with STATE.lock:
             STATE.updated = int(time.time())
             STATE.feed = STATE.feed[-40:]
@@ -331,16 +339,19 @@ def poll_alert():
             req = urllib.request.Request(ALERT_URL, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=20) as r:
                 data = json.loads(r.read().decode("utf-8", "replace"))
-            on = ""
-            for st in data.get("states", []):
-                name = normalize(st.get("name", ""))
-                if "ніпропетр" in name or "днепропетр" in name:
-                    on = "on" if st.get("alertnow") else "off"
+            on = None
+            for key, st in (data.get("states") or {}).items():
+                if "ніпропетр" in key.lower() or "нiпропетр" in key.lower():
+                    on = st.get("alertnow")
                     break
             with STATE.lock:
-                STATE.alert_state = on or STATE.alert_state
+                if on is True or on is False:
+                    STATE.alert_state = "on" if on else "off"
+                STATE.sources["тривога"] = {"ok": True, "err": "", "time": int(time.time())}
         except Exception as e:
             print("alert: %s" % e, file=sys.stderr)
+            with STATE.lock:
+                STATE.sources["тривога"] = {"ok": False, "err": str(e)[:120], "time": int(time.time())}
         time.sleep(POLL_ALERT)
 
 
@@ -372,8 +383,8 @@ class Handler(BaseHTTPRequestHandler):
             html = html.replace("</head>", SHIM + "\n</head>")
             self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
             return
-        if path == "/dnipro-geo.js":
-            with open(os.path.join(ASSETS, "dnipro-geo.js"), "rb") as f:
+        if path in ("/dnipro-geo.js", "/data-dict.js", "/pipeline.js"):
+            with open(os.path.join(ASSETS, path[1:]), "rb") as f:
                 self._send(200, f.read(), "application/javascript; charset=utf-8")
             return
         self._send(404, b"not found", "text/plain")
