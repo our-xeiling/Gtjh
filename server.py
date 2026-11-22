@@ -26,8 +26,11 @@ STATIC = os.path.join(BASE, "static")
 DEFAULT_CHANNELS = ["dnepr_nagladach", "eyes_everywhere_dnipro", "PmSDnepra", "TesterbotTrevoga"]
 ALERT_URL = "https://ubilling.net.ua/aerialalerts/"
 POLL_CHANNELS = 15
+POLL_TG = 5
 POLL_ALERT = 60
 VISIBLE_SEC = 300
+APPROACH_OFFSET_KM = 15
+DIR_VEC = {"N": (1, 0), "S": (-1, 0), "E": (0, 1), "W": (0, -1)}
 HOST = "127.0.0.1"
 PORT = 8080
 
@@ -176,6 +179,14 @@ def _tokens(norm):
     return re.findall(r"[а-щьюяіїєґa-z0-9\-]+", norm)
 
 
+def _drift_vec(track_id, name):
+    h = 0
+    for c in ("%s|%s" % (track_id, name)):
+        h = (h * 31 + ord(c)) % 360
+    a = h * math.pi / 180
+    return (math.cos(a), math.sin(a))
+
+
 def occupied_spans(tokens):
     occ = set()
     for key in ("напрямки", "статуси", "типи"):
@@ -296,6 +307,7 @@ class TrackStore:
     def __init__(self):
         self.tracks = []
         self.seq = 0
+        self.msg_loc = {}
 
     @staticmethod
     def marker_of(t):
@@ -319,16 +331,28 @@ class TrackStore:
                     return "red"
         return "yellow"
 
-    def apply(self, p):
-        if not p["coords"]:
-            return
+    def apply(self, p, msg_id=None, reply_to=None):
+        ch = p["channel"]
         target = None
-        if p["same_hint"]:
-            target = self._last_active() or (self.tracks[-1] if self.tracks else None)
-        elif p["new_hint"] or not self.tracks:
-            target = None
-        else:
-            target = self._last_active()
+        if reply_to is not None and (ch, reply_to) in self.msg_loc:
+            target = self.msg_loc[(ch, reply_to)]
+        elif (p["same_hint"] or reply_to is not None) or not p["new_hint"]:
+            target = self._last_active(ch)
+        if not p["coords"]:
+            if target is None or p["status"] == "unknown":
+                return
+            if p["status"]:
+                target["status"] = p["status"]
+            if p["type"] != "ціль":
+                target["type"] = p["type"]
+            if p["direction"]:
+                target["heading"] = p["direction"]
+            target["last_text"] = p["raw"]
+            target["last_update"] = p["time"]
+            target["channel"] = ch
+            if msg_id is not None:
+                self._bind(ch, msg_id, target)
+            return
         if target is None:
             self.seq += 1
             target = {"id": "t%d" % self.seq, "channel": p["channel"], "type": "ціль",
@@ -354,15 +378,31 @@ class TrackStore:
         for name, (lat, lon) in zip(p["places"], p["coords"]):
             locs = target["locations"]
             if not locs or locs[-1]["name"] != name:
-                locs.append({"name": name, "lat": lat, "lon": lon, "t": p["time"]})
+                la, lo = lat, lon
+                if p["status"] not in ("overhead", "lost") and any(
+                        name == cn for cn, _, _ in BIG_CITIES):
+                    dvec = DIR_VEC.get(p["direction"]) or _drift_vec(target["id"], name)
+                    la += dvec[0] * APPROACH_OFFSET_KM / 111.0
+                    lo += dvec[1] * APPROACH_OFFSET_KM / (111.0 * math.cos(lat * math.pi / 180))
+                locs.append({"name": name, "lat": la, "lon": lo, "t": p["time"]})
             target["locations"] = locs[-12:]
+        if msg_id is not None:
+            self._bind(ch, msg_id, target)
 
-    def _last_active(self):
+    def _last_active(self, channel=None):
         found = None
         for t in self.tracks:
+            if channel and t.get("channel") != channel:
+                continue
             if ACTIVE_STATUSES & {t["status"]} or t["status"] in ("lost", "redetected"):
                 found = t
         return found
+
+    def _bind(self, channel, msg_id, target):
+        self.msg_loc[(channel, msg_id)] = target
+        if len(self.msg_loc) > 500:
+            for k in list(self.msg_loc)[:len(self.msg_loc) - 300]:
+                self.msg_loc.pop(k, None)
 
     def prune(self):
         now = time.time()
@@ -449,9 +489,11 @@ class TelethonPoller:
                         async for mm in client.iter_messages(entity, limit=20, min_id=self.min_id[ch]):
                             if not mm.message:
                                 continue
-                            msgs.append((mm.id, int(mm.date.timestamp()), mm.message))
-                        for mid, ts, text in sorted(msgs):
-                            handle_message(ch, text, ts)
+                            rto = getattr(mm, "reply_to", None)
+                            rto = getattr(rto, "reply_to_msg_id", None) if rto else None
+                            msgs.append((mm.id, int(mm.date.timestamp()), mm.message, rto))
+                        for mid, ts, text, rto in sorted(msgs):
+                            handle_message(ch, text, ts, msg_id=mid, reply_to=rto)
                         if msgs:
                             self.min_id[ch] = max(self.min_id[ch], max(m[0] for m in msgs))
                         STATE.sources[ch] = {"ok": True, "err": "", "time": int(time.time())}
@@ -461,7 +503,7 @@ class TelethonPoller:
                 with STATE.lock:
                     STATE.updated = int(time.time())
                     STATE.feed = STATE.feed[-40:]
-                await asyncio.sleep(POLL_CHANNELS)
+                await asyncio.sleep(POLL_TG)
 
         try:
             asyncio.run(main())
@@ -493,7 +535,12 @@ def tg_fetch(channel):
                 ts = calendar.timegm(time.strptime(tm.group(1)[:16], "%Y-%m-%dT%H:%M"))
             except Exception:
                 pass
-        msgs.append({"id": mid, "time": ts, "text": text})
+        msg = {"id": mid, "time": ts, "text": text, "reply_to": None}
+        chunk = html[max(0, m.start() - 4000):m.start()]
+        if "tgme_widget_message_reply" in chunk:
+            rm = re.search(r'href="/%s/(\d+)' % channel, chunk[-1500:])
+            msg["reply_to"] = int(rm.group(1)) if rm else "last"
+        msgs.append(msg)
     return msgs
 
 
@@ -503,7 +550,9 @@ def poll_channels_fallback():
         for ch in DEFAULT_CHANNELS:
             try:
                 for msg in tg_fetch(ch):
-                    handle_message(ch, msg["text"], msg["time"])
+                    handle_message(ch, msg["text"], msg["time"],
+                                   msg_id=int(msg["id"] or 0) or None,
+                                   reply_to=msg["reply_to"])
                 STATE.tracks.prune()
                 STATE.sources[ch] = {"ok": True, "err": "", "time": int(time.time())}
             except Exception as e:
@@ -515,19 +564,32 @@ def poll_channels_fallback():
         time.sleep(POLL_CHANNELS)
 
 
-def handle_message(channel, text, ts):
+FEED_SEEN = {}
+
+
+def handle_message(channel, text, ts, msg_id=None, reply_to=None):
+    if msg_id is not None:
+        seen = FEED_SEEN.setdefault(channel, set())
+        if msg_id in seen:
+            return
+        seen.add(msg_id)
+        if len(seen) > 400:
+            FEED_SEEN[channel] = set(sorted(seen)[-200:])
     parsed = parse_message(text, channel, ts)
     if not parsed:
         return
+    if parsed.get("kind") == "target" and reply_to is not None:
+        parsed["same_hint"] = True
     with STATE.lock:
         STATE.feed.append({"channel": channel, "time": ts, "kind": parsed["kind"], "text": text})
         if "alert_on" in parsed:
             STATE.alert_state = "on" if parsed["alert_on"] else STATE.alert_state
         elif parsed["status"] == "all_clear" and parsed["kind"] != "alert_echo":
             STATE.alert_state = "off"
-        if parsed["kind"] == "target":
+        if parsed["kind"] == "target" or (
+                parsed["kind"] == "feed" and parsed["status"] != "unknown"):
             prev = STATE.tracks.tracks[-1]["status"] if STATE.tracks.tracks else ""
-            STATE.tracks.apply(parsed)
+            STATE.tracks.apply(parsed, msg_id=msg_id, reply_to=reply_to)
             cur = STATE.tracks.tracks[-1]["status"] if STATE.tracks.tracks else ""
             if cur != prev and cur in ("approach", "overhead"):
                 notify(cur)
