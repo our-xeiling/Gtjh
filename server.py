@@ -331,10 +331,14 @@ class TrackStore:
                     return "red"
         return "yellow"
 
-    def apply(self, p, msg_id=None, reply_to=None):
+    def apply(self, p, msg_id=None, reply_to=None, track_id=None):
         ch = p["channel"]
         target = None
-        if reply_to is not None and (ch, reply_to) in self.msg_loc:
+        if track_id is not None:
+            target = next((t for t in self.tracks if t["id"] == track_id), None)
+            if target is None:
+                return None
+        elif reply_to is not None and (ch, reply_to) in self.msg_loc:
             target = self.msg_loc[(ch, reply_to)]
         elif (p["same_hint"] or reply_to is not None) or not p["new_hint"]:
             target = self._last_active(ch)
@@ -352,7 +356,7 @@ class TrackStore:
             target["channel"] = ch
             if msg_id is not None:
                 self._bind(ch, msg_id, target)
-            return
+            return target
         if target is None:
             self.seq += 1
             target = {"id": "t%d" % self.seq, "channel": p["channel"], "type": "ціль",
@@ -388,6 +392,7 @@ class TrackStore:
             target["locations"] = locs[-12:]
         if msg_id is not None:
             self._bind(ch, msg_id, target)
+        return target
 
     def _last_active(self, channel=None):
         found = None
@@ -564,6 +569,112 @@ def poll_channels_fallback():
         time.sleep(POLL_CHANNELS)
 
 
+LLM_CFG = {}
+LLM_CACHE = {}
+LLM_DEFAULTS = {"api_url": "https://api.mistral.ai/v1/chat/completions",
+                "api_key": "", "model": "mistral-small-latest"}
+
+
+def _llm_request(raw):
+    url = LLM_CFG.get("api_url") or LLM_DEFAULTS["api_url"]
+    model = LLM_CFG.get("model") or LLM_DEFAULTS["model"]
+    names = "; ".join(p["name"] for p in PLACES)
+    sys_prompt = (
+        "Ти помічник спостерігача за повітряними цілями. Повідомлення українською або російською, "
+        "часто з разговорного сленгу. Поверни ТІЛЬКИ JSON без пояснень у вигляді: "
+        '{"places": ["назви з довідника"], "type": "ід или null", "status": "ід или null", '
+        '"direction": "N"|"S"|"E"|"W"|null, "count": число или null}. '
+        "type — один із: " + ", ".join((DICT.get("типи") or {}).keys())
+        + ". status — один із: " + ", ".join(STATUS_KEYS)
+        + ". direction — напрямок польоту цілі. count — скільки цілей, если указано. "
+        "places — ТОЛЬКИ назви із довідника: " + names + ". "
+        "Если щось не видно у тексті — стави null. Не вигадуй населених пунктів."
+    )
+    body = json.dumps({
+        "model": model,
+        "messages": [{"role": "system", "content": sys_prompt},
+                     {"role": "user", "content": raw[:800]}],
+        "temperature": 0.1, "max_tokens": 250,
+    }).encode()
+    req = urllib.request.Request(url, data=body, headers={
+        "Content-Type": "application/json",
+        "Authorization": "Bearer %s" % LLM_CFG.get("api_key", "")})
+    with urllib.request.urlopen(req, timeout=12) as r:
+        data = json.loads(r.read().decode("utf-8", "replace"))
+    txt = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    m = re.search(r"\{.*\}", txt, re.S)
+    if not m:
+        return None
+    j = json.loads(m.group(0))
+    return j if isinstance(j, dict) else None
+
+
+def llm_refine(raw, channel, ts, target_id):
+    if not LLM_CFG.get("api_key"):
+        return
+    ck = (channel, raw)
+    j = LLM_CACHE.get(ck)
+    if j is None:
+        try:
+            j = _llm_request(raw)
+            LLM_CACHE[ck] = j
+            STATE.sources["ии"] = {"ok": bool(j), "err": "" if j else "пустой ответ", "time": int(time.time())}
+        except Exception as e:
+            STATE.sources["ии"] = {"ok": False, "err": str(e)[:120], "time": int(time.time())}
+            return
+    if not j:
+        return
+    p2 = {"kind": "target", "channel": channel, "raw": raw, "text": raw, "time": ts,
+          "type": None, "status": None, "direction": None, "places": [], "coords": [],
+          "count": None, "altitude": None, "new_hint": False, "same_hint": False}
+    if j.get("type") in (DICT.get("типи") or {}):
+        p2["type"] = j["type"]
+    if j.get("status") in STATUS_KEYS:
+        p2["status"] = j["status"]
+    if j.get("direction") in ("N", "S", "E", "W"):
+        p2["direction"] = j["direction"]
+    try:
+        if j.get("count"):
+            p2["count"] = int(j["count"])
+    except (TypeError, ValueError):
+        pass
+    allowed = {}
+    for pl in PLACES:
+        allowed.setdefault(normalize(pl["name"]), pl)
+    for nm in (j.get("places") or [])[:4]:
+        if not isinstance(nm, str) or not nm.strip():
+            continue
+        nn = normalize(nm)
+        pl = allowed.get(nn)
+        if not pl:
+            for k, v in allowed.items():
+                if _cp(k, nn) >= min(len(k), len(nn)) - 2 and abs(len(k) - len(nn)) <= 2:
+                    pl = v
+                    break
+        if pl and pl["name"] not in p2["places"]:
+            p2["places"].append(pl["name"])
+            p2["coords"].append((pl["lat"], pl["lon"]))
+    if not (p2["places"] or p2["status"] or p2["type"] or p2["count"] or p2["direction"]):
+        return
+    with STATE.lock:
+        t = next((t for t in STATE.tracks.tracks if t["id"] == target_id), None)
+        if p2["status"] and t is not None and t["status"] not in ("unknown",):
+            p2["status"] = None
+    STATE.tracks.apply(p2, track_id=target_id)
+
+
+def _wants_llm(parsed, norm):
+    if not LLM_CFG.get("api_key"):
+        return False
+    if parsed["kind"] == "target":
+        return parsed["status"] == "unknown"
+    if parsed["kind"] == "feed":
+        n = normalize(norm)
+        return dict_first(n, DICT.get("типи")) is not None or any(
+            w in n for w in ("ціл", "цел", "геран", "шахед", "джед"))
+    return False
+
+
 FEED_SEEN = {}
 
 
@@ -580,6 +691,7 @@ def handle_message(channel, text, ts, msg_id=None, reply_to=None):
         return
     if parsed.get("kind") == "target" and reply_to is not None:
         parsed["same_hint"] = True
+    tgt_id = None
     with STATE.lock:
         STATE.feed.append({"channel": channel, "time": ts, "kind": parsed["kind"], "text": text})
         if "alert_on" in parsed:
@@ -589,10 +701,14 @@ def handle_message(channel, text, ts, msg_id=None, reply_to=None):
         if parsed["kind"] == "target" or (
                 parsed["kind"] == "feed" and parsed["status"] != "unknown"):
             prev = STATE.tracks.tracks[-1]["status"] if STATE.tracks.tracks else ""
-            STATE.tracks.apply(parsed, msg_id=msg_id, reply_to=reply_to)
+            tgt = STATE.tracks.apply(parsed, msg_id=msg_id, reply_to=reply_to)
+            tgt_id = tgt["id"] if tgt else None
             cur = STATE.tracks.tracks[-1]["status"] if STATE.tracks.tracks else ""
             if cur != prev and cur in ("approach", "overhead"):
                 notify(cur)
+    if _wants_llm(parsed, parsed.get("text") or ""):
+        threading.Thread(target=llm_refine, args=(text, channel, ts, tgt_id),
+                         daemon=True).start()
 
 
 def notify(status):
@@ -667,7 +783,8 @@ def write_config_if_missing():
                 "api_id": 0,
                 "api_hash": "ВСТАВЬ_СЮДА_СВОЙ_API_HASH",
                 "phone": "+380XXXXXXXXX",
-                "channels": DEFAULT_CHANNELS
+                "channels": DEFAULT_CHANNELS,
+                "llm": dict(LLM_DEFAULTS)
             }, f, ensure_ascii=False, indent=2)
         return False
     return True
@@ -680,6 +797,19 @@ def main():
         sys.exit(0)
     with open(os.path.join(BASE, "config.json"), encoding="utf-8") as f:
         cfg = json.load(f)
+    if "llm" not in cfg:
+        cfg["llm"] = dict(LLM_DEFAULTS)
+        with open(os.path.join(BASE, "config.json"), "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        print("\nДобавил раздел \"llm\" в config.json — можешь вставить api_key (https://console.mistral.ai, бесплатно),")
+        print("или оставь пустым — тогда работает обычный парсер без ИИ\n")
+    global LLM_CFG
+    llm = cfg.get("llm") or {}
+    LLM_CFG = {"api_url": llm.get("api_url") or LLM_DEFAULTS["api_url"],
+               "api_key": llm.get("api_key") or "",
+               "model": llm.get("model") or LLM_DEFAULTS["model"]}
+    if not LLM_CFG["api_key"]:
+        STATE.sources["ии"] = {"ok": False, "err": "ключа нет", "time": int(time.time())}
     channels = cfg.get("channels") or DEFAULT_CHANNELS
     api_id = int(cfg.get("api_id") or 0)
     api_hash = cfg.get("api_hash") or ""
