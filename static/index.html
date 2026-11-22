@@ -153,22 +153,18 @@ function renderState(state) {
 var mapApi = null;
 
 function initLeaflet() {
-  var darkTiles = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
-    maxZoom: 19, attribution: "© OpenStreetMap © CARTO"
-  });
-  var lightTiles = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
-    maxZoom: 19, attribution: "© OpenStreetMap © CARTO"
+  var osmTiles = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19, attribution: "© OpenStreetMap contributors"
   });
   var map = L.map("map", { zoomControl: true }).fitBounds(OB_BBOX, { padding: [8, 8] });
-  darkTiles.addTo(map);
+  osmTiles.addTo(map);
 
   var tracksLayer = L.layerGroup().addTo(map);
 
   document.getElementById("theme-btn").addEventListener("click", function () {
-    var light = document.body.classList.toggle("light");
-    map.removeLayer(light ? darkTiles : lightTiles);
-    map.addLayer(light ? lightTiles : darkTiles);
-    document.getElementById("theme-btn").textContent = light ? "🌙" : "☀";
+    document.body.classList.toggle("light");
+    document.getElementById("theme-btn").textContent =
+      document.body.classList.contains("light") ? "🌙" : "☀";
   });
 
   return {
