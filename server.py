@@ -575,7 +575,15 @@ LLM_DEFAULTS = {"api_url": "https://api.mistral.ai/v1/chat/completions",
                 "api_key": "", "model": "mistral-small-latest"}
 
 
-def _llm_request(raw):
+def _llm_user(raw, ctx=()):
+    if not ctx:
+        return raw[:800]
+    lines = "\n".join("- " + c[:200] for c in ctx[-5:])
+    return ("Контекст (попередні повідомлення каналу):\n" + lines
+            + "\n\nПоточне повідомлення:\n" + raw[:800])
+
+
+def _llm_request(raw, ctx=()):
     url = LLM_CFG.get("api_url") or LLM_DEFAULTS["api_url"]
     model = LLM_CFG.get("model") or LLM_DEFAULTS["model"]
     names = "; ".join(p["name"] for p in PLACES)
@@ -588,12 +596,12 @@ def _llm_request(raw):
         + ". status — один із: " + ", ".join(STATUS_KEYS)
         + ". direction — напрямок польоту цілі. count — скільки цілей, если указано. "
         "places — ТОЛЬКИ назви із довідника: " + names + ". "
-        "Если щось не видно у тексті — стави null. Не вигадуй населених пунктів."
+        "Если щось не видно у тексті — стави null. Не вигадуй населених пунктів. Контекст — попередні повідомлення того ж каналу: використовуй його щоб зрозуміти «той самий», «без фіксації», «виліз», заміну займенників."
     )
     body = json.dumps({
         "model": model,
         "messages": [{"role": "system", "content": sys_prompt},
-                     {"role": "user", "content": raw[:800]}],
+                     {"role": "user", "content": _llm_user(raw, ctx)}],
         "temperature": 0.1, "max_tokens": 250,
     }).encode()
     req = urllib.request.Request(url, data=body, headers={
@@ -609,14 +617,16 @@ def _llm_request(raw):
     return j if isinstance(j, dict) else None
 
 
-def llm_refine(raw, channel, ts, target_id):
+def llm_refine(raw, channel, ts, target_id, ctx=()):
     if not LLM_CFG.get("api_key"):
         return
-    ck = (channel, raw)
+    ck = (channel, raw, tuple(c[:120] for c in ctx))
     j = LLM_CACHE.get(ck)
     if j is None:
         try:
-            j = _llm_request(raw)
+            j = _llm_request(raw, ctx)
+            if len(LLM_CACHE) > 300:
+                LLM_CACHE.clear()
             LLM_CACHE[ck] = j
             STATE.sources["ии"] = {"ok": bool(j), "err": "" if j else "пустой ответ", "time": int(time.time())}
         except Exception as e:
@@ -657,7 +667,10 @@ def llm_refine(raw, channel, ts, target_id):
     if not (p2["places"] or p2["status"] or p2["type"] or p2["count"] or p2["direction"]):
         return
     with STATE.lock:
-        t = next((t for t in STATE.tracks.tracks if t["id"] == target_id), None)
+        if target_id is not None:
+            t = next((t for t in STATE.tracks.tracks if t["id"] == target_id), None)
+        else:
+            t = STATE.tracks._last_active(channel)
         if p2["status"] and t is not None and t["status"] not in ("unknown",):
             p2["status"] = None
     STATE.tracks.apply(p2, track_id=target_id)
@@ -666,13 +679,7 @@ def llm_refine(raw, channel, ts, target_id):
 def _wants_llm(parsed, norm):
     if not LLM_CFG.get("api_key"):
         return False
-    if parsed["kind"] == "target":
-        return parsed["status"] == "unknown"
-    if parsed["kind"] == "feed":
-        n = normalize(norm)
-        return dict_first(n, DICT.get("типи")) is not None or any(
-            w in n for w in ("ціл", "цел", "геран", "шахед", "джед"))
-    return False
+    return parsed["kind"] in ("target", "feed")
 
 
 FEED_SEEN = {}
@@ -692,7 +699,9 @@ def handle_message(channel, text, ts, msg_id=None, reply_to=None):
     if parsed.get("kind") == "target" and reply_to is not None:
         parsed["same_hint"] = True
     tgt_id = None
+    ctx = []
     with STATE.lock:
+        ctx = [e["text"] for e in STATE.feed if e.get("channel") == channel][-5:]
         STATE.feed.append({"channel": channel, "time": ts, "kind": parsed["kind"], "text": text})
         if "alert_on" in parsed:
             STATE.alert_state = "on" if parsed["alert_on"] else STATE.alert_state
@@ -707,7 +716,7 @@ def handle_message(channel, text, ts, msg_id=None, reply_to=None):
             if cur != prev and cur in ("approach", "overhead"):
                 notify(cur)
     if _wants_llm(parsed, parsed.get("text") or ""):
-        threading.Thread(target=llm_refine, args=(text, channel, ts, tgt_id),
+        threading.Thread(target=llm_refine, args=(text, channel, ts, tgt_id, ctx),
                          daemon=True).start()
 
 

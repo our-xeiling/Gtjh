@@ -27,10 +27,12 @@ CANNED = {"places": ["Дніпро", "Загадкове Селище"], "type":
           "status": "tracked", "direction": "N", "count": 2}
 
 calls = {"n": 0}
+seen = []
 
 
-def fake_request(raw):
+def fake_request(raw, ctx=()):
     calls["n"] += 1
+    seen.append((raw, list(ctx)))
     return dict(CANNED)
 
 
@@ -45,15 +47,28 @@ check(True, "no key -> llm_refine safe no-op")
 srv.LLM_CFG = {"api_key": "TEST", "api_url": "", "model": "test"}
 srv._llm_request = fake_request
 check(srv._wants_llm({"kind": "target", "status": "unknown"}, WEAK) is True,
-      "key set + unknown status -> wants LLM")
-check(srv._wants_llm({"kind": "target", "status": "lost"}, "x") is False,
-      "known status -> no LLM")
+      "target -> wants LLM")
+check(srv._wants_llm({"kind": "target", "status": "lost"}, "x") is True,
+      "target known status -> still wants LLM (every post)")
+check(srv._wants_llm({"kind": "feed", "status": "unknown"}, "x") is True,
+      "feed -> wants LLM")
+check(srv._wants_llm({"kind": "alert_echo"}, "x") is False,
+      "alert_echo -> no LLM")
 
+srv.handle_message("TesterbotTrevoga", "попередне повідомлення каналу", now - 1,
+                   msg_id=299)
 srv.handle_message("TesterbotTrevoga", WEAK, now, msg_id=300)
 time.sleep(0.6)
 tt = tracks()
 t = [x for x in tt if x["channel"] == "TesterbotTrevoga" and x["type"] == "rbpla"]
 check(bool(t), "LLM thread refined weak target: type rbpla")
+check(len(seen) >= 1 and any("попередне повідомлення каналу" in c
+                            for _, cl in seen for c in cl),
+      "context passed to LLM request")
+wrapped = srv._llm_user("MSG", ["А", "Б"])
+check("Контекст" in wrapped and "А" in wrapped and "Б" in wrapped
+      and "MSG" in wrapped, "request wraps ctx + current message")
+check(srv._llm_user("MSG") == "MSG", "no ctx -> plain message")
 if t:
     t = t[-1]
     check(t["status"] == "tracked", "LLM: status tracked applied")
@@ -68,32 +83,34 @@ if t:
 check(srv.STATE.sources.get("ии", {}).get("ok") is True, "sources[ии] ok=True")
 
 n0 = calls["n"]
-srv.llm_refine(WEAK, "TesterbotTrevoga", now, t["id"])
+srv.llm_refine(WEAK, "TesterbotTrevoga", now, t["id"], seen[-1][1])
 check(calls["n"] == n0, "second same call served from cache")
 
 srv.handle_message("dnepr_nagladach", "Ціль над П'ятихатки пропала", now + 5,
                    msg_id=301)
+srv.LLM_CACHE.clear()
+srv._llm_request = lambda raw, ctx=(): {"places": [], "status": "tracked",
+                                        "type": None, "direction": None,
+                                        "count": None}
+time.sleep(0.6)
 tt = tracks()
 tl = [x for x in tt if x["status"] == "lost"]
 check(bool(tl), "track with known status exists")
 if tl:
     tl = tl[-1]
-    srv._llm_request = lambda raw: {"places": [], "status": "tracked",
-                                    "type": None, "direction": None, "count": None}
     srv.llm_refine("десь виліз", "dnepr_nagladach", now + 6, tl["id"])
     tt = tracks()
     t2 = next(x for x in tt if x["id"] == tl["id"])
     check(t2["status"] == "lost", "LLM: no status overwrite over known status")
 
-srv._llm_request = lambda raw: {"places": ["Атлантида"], "type": None,
-                                "status": None, "direction": None, "count": None}
-before = tracks()
+srv._llm_request = lambda raw, ctx=(): {"places": ["Атлантида"], "type": None,
+                                        "status": None, "direction": None,
+                                        "count": None}
 srv.LLM_CACHE.clear()
+before = tracks()
 srv.llm_refine("щось десь", "PmSDnepra", now + 7,
                before[-1]["id"] if before else "t9")
-after = tracks()
-check(json.dumps(before) == json.dumps(after) or True,
-      "all-fabricated LLM answer does not crash")
+check(True, "all-fabricated LLM answer does not crash")
 
 print("ALL OK" if OK["ok"] else "FAILURES PRESENT")
 sys.exit(0 if OK["ok"] else 1)
