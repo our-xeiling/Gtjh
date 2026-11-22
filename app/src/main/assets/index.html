@@ -4,7 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Карта загроз — Дніпропетровщина</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
   :root {
     --bg: #11151c;
@@ -69,9 +68,29 @@
     z-index: 1000;
   }
   #legend span { display: inline-flex; align-items: center; gap: 4px; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
-  #map { flex: 1; min-height: 0; }
-  #updated { font-size: 10px; color: var(--muted); padding: 3px 12px; background: var(--panel); border-top: 1px solid var(--border); }
+  .lgplus { display: inline-block; width: 14px; height: 14px; line-height: 13px; text-align: center;
+    font: 700 13px/13px monospace; }
+  .lgplus.red { color: #ff1744; }
+  .lgplus.yellow { color: #ffd400; }
+  .lgplus.gray { color: #9e9e9e; }
+  #map { flex: 1; min-height: 0; position: relative; }
+  #map canvas { width: 100%; height: 100%; display: block; }
+  #map.error:after {
+    content: attr(data-err);
+    position: absolute; left: 50%; top: 50%;
+    transform: translate(-50%,-50%);
+    background: var(--panel); color: #ef5350;
+    padding: 10px 14px; border: 1px solid var(--border);
+    border-radius: 8px; font-size: 13px; max-width: 92%;
+    text-align: center; z-index: 2000;
+  }
+  .plus { width: 24px; height: 24px; font: 700 22px/22px 'Courier New', monospace;
+    text-align: center; cursor: pointer; text-shadow: 0 0 3px rgba(0,0,0,.9); }
+  .plus.red { color: #ff1744; }
+  .plus.yellow { color: #ffd400; }
+  .plus.gray { color: #9e9e9e; opacity: .6; }
+  #updated { font-size: 10px; color: var(--muted); padding: 3px 12px; background: var(--panel);
+    border-top: 1px solid var(--border); }
   #feed {
     height: 165px;
     overflow-y: auto;
@@ -85,6 +104,9 @@
   #feed .item .meta { color: var(--muted); font-size: 10.5px; }
   #feed .item.noise { opacity: 0.45; }
   #feed .item.alert { color: #ef5350; font-weight: 600; }
+  .cbtns { position: absolute; right: 8px; top: 8px; z-index: 1500; flex-direction: column; gap: 4px; display: none; }
+  .cbtns button { width: 34px; height: 34px; border: 1px solid var(--border); background: var(--panel);
+    color: var(--text); border-radius: 6px; font-size: 18px; }
 </style>
 </head>
 <body>
@@ -94,201 +116,389 @@
   <button id="theme-btn" title="Тема">☀</button>
 </header>
 <div id="legend">
-  <span><i class="dot" style="background:#ffa726"></i>Зафіксовано</span>
-  <span><i class="dot" style="background:#fb8c00"></i>Курс</span>
-  <span><i class="dot" style="background:#fdd835"></i>Транзит</span>
-  <span><i class="dot" style="background:#e53935"></i>Над вами</span>
-  <span><i class="dot" style="background:#ab47bc"></i>Циркулює</span>
-  <span><i class="dot" style="background:#9e9e9e"></i>Пропав</span>
-  <span><i class="dot" style="background:#43a047"></i>Без загроз</span>
-  <span><i class="dot" style="background:#78909c"></i>Ціль</span>
+  <span><i class="lgplus yellow">+</i>Без прямої загрози містам</span>
+  <span><i class="lgplus red">+</i>Загроза великим містам</span>
+  <span><i class="lgplus gray">+</i>Пропав</span>
 </div>
-<div id="map"></div>
+<div id="map" data-err=""><div class="cbtns" id="cbtns"><button id="zin">+</button><button id="zout">−</button></div></div>
 <div id="updated">Оновлюється…</div>
 <div id="feed"><h2>Останні повідомлення</h2><div id="feed-items"></div></div>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="dnipro-geo.js"></script>
 <script>
-const STATUS_UK = {
+/* CDN-незалежне завантаження Leaflet (3 дзеркала) */
+var LEAFLET_BASES = [
+  "https://unpkg.com/leaflet@1.9.4/dist/",
+  "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/",
+  "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/"
+];
+function loadWithFallback(bases, cssName, jsName, done, fail) {
+  var i = 0;
+  function next() {
+    if (i >= bases.length) { fail(); return; }
+    var base = bases[i++];
+    var link = document.createElement("link");
+    link.rel = "stylesheet"; link.href = base + cssName;
+    document.head.appendChild(link);
+    var s = document.createElement("script");
+    s.src = base + jsName;
+    s.onload = function () { if (window.L) done(base); else next(); };
+    s.onerror = function () { next(); };
+    document.head.appendChild(s);
+  }
+  next();
+}
+
+var STATUS_UK = {
   detected: "Зафіксовано", tracked: "Курс", transit: "Транзит",
   approach: "Наближення", overhead: "Над вами", loiter: "Циркулює",
   lost: "Пропав", redetected: "Знову виявлений", left: "Пішов",
   no_threat: "Без загроз", all_clear: "Відбій", unknown: "Ціль"
 };
-const STATUS_COLOR = {
-  detected: "#ffa726", tracked: "#fb8c00", transit: "#fdd835",
-  approach: "#ff5252", overhead: "#e53935", loiter: "#ab47bc",
-  lost: "#9e9e9e", redetected: "#ffa726", left: "#43a047",
-  no_threat: "#43a047", all_clear: "#43a047", unknown: "#78909c"
-};
-const OBLAST_POLY = [
-  [48.80,33.65],[48.83,34.10],[48.78,34.75],[48.86,35.20],[48.90,35.55],
-  [48.75,36.10],[48.60,36.25],[48.30,36.25],[47.95,36.30],[47.70,36.05],
-  [47.45,35.85],[47.35,35.40],[47.45,34.85],[47.55,34.45],[47.45,34.10],
-  [47.70,33.95],[47.70,33.55],[47.95,33.30],[48.10,33.30],[48.30,33.45],
-  [48.45,33.55],[48.60,33.60]
-];
-const CHANNEL_UK = {
+var CHANNEL_UK = {
   dnepr_nagladach: "Наглядач Дніпра",
   eyes_everywhere_dnipro: "Очі Всюди",
   PmSDnepra: "ПмС",
   TesterbotTrevoga: "Тест"
 };
-
-const darkTiles = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
-  maxZoom: 18,
-  attribution: "© OpenStreetMap © CARTO"
-});
-const lightTiles = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
-  maxZoom: 18,
-  attribution: "© OpenStreetMap © CARTO"
-});
-
-const map = L.map("map", { zoomControl: true }).setView([48.35, 35.05], 8);
-darkTiles.addTo(map);
-
-const oblastLayer = L.polygon(OBLAST_POLY, {
-  color: "#43a047", weight: 2, fillOpacity: 0.15
-}).addTo(map).bindTooltip("Дніпропетровська область");
-
-const tracksLayer = L.layerGroup().addTo(map);
-
-document.getElementById("theme-btn").addEventListener("click", () => {
-  const light = document.body.classList.toggle("light");
-  map.removeLayer(light ? darkTiles : lightTiles);
-  map.addLayer(light ? lightTiles : darkTiles);
-  document.getElementById("theme-btn").textContent = light ? "🌙" : "☀";
-});
+var BIG_CITIES = [
+  { name: "Дніпро", lat: 48.4647, lon: 35.0462 },
+  { name: "Кривий Ріг", lat: 47.9105, lon: 33.3918 },
+  { name: "Нікополь", lat: 47.5716, lon: 34.4003 },
+  { name: "Кам'янське", lat: 48.5136, lon: 34.6006 },
+  { name: "Павлоград", lat: 48.5334, lon: 35.8676 }
+];
+var SAFE_STATUSES = { no_threat: 1, left: 1, all_clear: 1 };
+var FALLBACK_RING = [[48.80,33.65],[48.83,34.10],[48.78,34.75],[48.86,35.20],[48.90,35.55],
+  [48.75,36.10],[48.60,36.25],[48.30,36.25],[47.95,36.30],[47.70,36.05],
+  [47.45,35.85],[47.35,35.40],[47.45,34.85],[47.55,34.45],[47.45,34.10],
+  [47.70,33.95],[47.70,33.55],[47.95,33.30],[48.10,33.30],[48.30,33.45],
+  [48.45,33.55],[48.60,33.60]];
 
 function esc(s) {
   return String(s == null ? "" : s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
-
 function fmtTime(sec) {
   if (!sec) return "";
-  const d = new Date(sec * 1000);
+  var d = new Date(sec * 1000);
   return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
 }
+function distKm(la1, lo1, la2, lo2) {
+  var R = 6371, rad = Math.PI / 180;
+  var dLa = (la2 - la1) * rad, dLo = (lo2 - lo1) * rad;
+  var a = Math.sin(dLa / 2) * Math.sin(dLa / 2) +
+    Math.cos(la1 * rad) * Math.cos(la2 * rad) * Math.sin(dLo / 2) * Math.sin(dLo / 2);
+  return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+function lastLoc(t) {
+  return t.locations && t.locations.length ? t.locations[t.locations.length - 1] : null;
+}
+function threatColor(t) {
+  if (t.status === "lost") return "gray";
+  if (SAFE_STATUSES[t.status]) return "yellow";
+  if (t.status === "approach" || t.status === "overhead") return "red";
+  var locs = t.locations || [];
+  for (var i = 0; i < locs.length; i++) {
+    for (var j = 0; j < BIG_CITIES.length; j++) {
+      if (distKm(locs[i].lat, locs[i].lon, BIG_CITIES[j].lat, BIG_CITIES[j].lon) < 45) return "red";
+    }
+  }
+  return "yellow";
+}
+var LINE_COLOR = { red: "#ff1744", yellow: "#ffd400", gray: "#9e9e9e" };
+function trackLabel(t) {
+  return [
+    t.type === "ціль" ? "Ціль" : (t.type || "").toUpperCase(),
+    t.count ? t.count + "x" : null,
+    (lastLoc(t) || {}).name,
+    STATUS_UK[t.status] || t.status,
+    t.altitude_m ? t.altitude_m + " м" : null,
+    t.pattern ? "циркулює" : null,
+    fmtTime(t.last_update)
+  ].filter(Boolean).join(" · ");
+}
 
-function render(state) {
-  const badge = document.getElementById("alert-badge");
-  const alertOn = state.alerts && state.alerts.state === "on";
+var OB_COLOR = "#43a047";
+
+function renderState(state) {
+  if (!state || !Array.isArray(state.tracks)) state = { tracks: [], feed: [], alerts: { state: "" }, updated: Math.floor(Date.now() / 1000) };
+  var alertOn = state.alerts && state.alerts.state === "on";
+  var badge = document.getElementById("alert-badge");
   badge.textContent = alertOn ? "ТРИВОГА" : "Спокій";
   badge.classList.toggle("on", alertOn);
-  oblastLayer.setStyle({
-    color: alertOn ? "#e53935" : "#43a047",
-    fillColor: alertOn ? "#e53935" : "#43a047",
-    fillOpacity: alertOn ? 0.22 : 0.10
-  });
 
-  tracksLayer.clearLayers();
-  (state.tracks || []).forEach(t => {
-    const color = STATUS_COLOR[t.status] || STATUS_COLOR.unknown;
-    if (t.locations && t.locations.length > 1) {
-      L.polyline(t.locations.map(l => [l.lat, l.lon]), {
-        color: color,
-        weight: 2,
-        opacity: 0.6,
-        dashArray: (t.status === "lost" || t.status === "left") ? "4 6" : null
-      }).addTo(tracksLayer);
-    }
-    const last = t.locations && t.locations.length ? t.locations[t.locations.length - 1] : null;
-    if (!last) return;
-    const label = [
-      t.type === "ціль" ? "Ціль" : t.type.toUpperCase(),
-      t.count ? t.count + "x" : null,
-      last.name,
-      STATUS_UK[t.status] || t.status,
-      t.altitude_m ? t.altitude_m + " м" : null,
-      t.pattern ? "циркулює" : null,
-      fmtTime(t.last_update)
-    ].filter(Boolean).join(" · ");
-    const m = L.circleMarker([last.lat, last.lon], {
-      radius: 8,
-      color: "#ffffff",
-      weight: 1.5,
-      fillColor: color,
-      fillOpacity: t.status === "lost" ? 0.45 : 0.95
-    }).addTo(tracksLayer);
-    m.bindTooltip(label, { direction: "top" });
-    m.bindPopup(
-      "<b>" + esc(label) + "</b><br><small>" + esc(t.last_text) + "</small>" +
-      "<br><small style='opacity:.6'>" + esc(CHANNEL_UK[t.channel] || t.channel) + "</small>"
-    );
-    if (t.heading && (t.status === "tracked" || t.status === "detected" || t.status === "approach")) {
-      const arrow = { N: [-0.35, 0], S: [0.35, 0], E: [0, 0.5], W: [0, -0.5] }[t.heading];
-      if (arrow) {
-        L.polyline([[last.lat, last.lon], [last.lat + arrow[0], last.lon + arrow[1]]], {
-          color: color, weight: 2, opacity: 0.8, dashArray: "2 6"
-        }).addTo(tracksLayer);
-      }
-    }
-  });
+  mapApi.render(state, alertOn);
 
   document.getElementById("updated").textContent =
     "Оновлено: " + new Date((state.updated || Math.floor(Date.now() / 1000)) * 1000).toLocaleTimeString("uk-UA") +
-    " · джерело: офіційна інформація та публічні канали, не є офіційною системою оповіщення";
+    " · джерело: " + (window.__dataMode || "демо");
 
-  const items = (state.feed || []).slice().reverse();
-  document.getElementById("feed-items").innerHTML = items.map(f => {
-    const cls = f.kind === "noise" ? "noise" : (f.kind === "alert_echo" ? "alert" : "");
+  var items = (state.feed || []).slice().reverse();
+  document.getElementById("feed-items").innerHTML = items.map(function (f) {
+    var cls = f.kind === "noise" ? "noise" : (f.kind === "alert_echo" ? "alert" : "");
     return "<div class='item " + cls + "'><span class='meta'>" + esc(fmtTime(+f.time)) +
       " · " + esc(CHANNEL_UK[f.channel] || f.channel) + "</span><br>" + esc(f.text) + "</div>";
   }).join("");
 }
 
-function demoState() {
+/* Leaflet-карта */
+function initLeaflet() {
+  var darkTiles = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { maxZoom: 18, attribution: "© OpenStreetMap © CARTO" });
+  var lightTiles = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", { maxZoom: 18, attribution: "© OpenStreetMap © CARTO" });
+  var map = L.map("map", { preferCanvas: true, zoomControl: true }).setView([48.35, 35.05], 8);
+  darkTiles.addTo(map);
+
+  var rings = (window.OBLAST_GEO && window.OBLAST_GEO.length) ? window.OBLAST_GEO : [FALLBACK_RING];
+  var oblastLayers = L.layerGroup().addTo(map);
+  rings.forEach(function (r) {
+    L.polygon(r, { color: OB_COLOR, weight: 2, fillOpacity: 0.12 }).addTo(oblastLayers).bindTooltip("Дніпропетровська область");
+  });
+  try { map.fitBounds(L.latLngBounds(rings[0]), { padding: [10, 10] }); } catch (e) {}
+
+  var tracksLayer = L.layerGroup().addTo(map);
+
+  document.getElementById("theme-btn").addEventListener("click", function () {
+    var light = document.body.classList.toggle("light");
+    map.removeLayer(light ? darkTiles : lightTiles);
+    map.addLayer(light ? lightTiles : darkTiles);
+    document.getElementById("theme-btn").textContent = light ? "🌙" : "☀";
+    OB_COLOR = light ? "#2e7d32" : "#43a047";
+    oblastLayers.eachLayer(function (l) { l.setStyle({ color: OB_COLOR }); });
+  });
+
+  var currentAlert = false;
   return {
-    updated: Math.floor(Date.now() / 1000),
-    alerts: { state: "on", updated: Math.floor(Date.now() / 1000) },
+    render: function (state, alertOn) {
+      if (alertOn !== currentAlert) {
+        currentAlert = alertOn;
+        oblastLayers.eachLayer(function (l) {
+          l.setStyle({ color: alertOn ? "#e53935" : OB_COLOR, fillColor: alertOn ? "#e53935" : OB_COLOR, fillOpacity: alertOn ? 0.25 : 0.12 });
+        });
+      }
+      tracksLayer.clearLayers();
+      (state.tracks || []).forEach(function (t) {
+        var c = threatColor(t), color = LINE_COLOR[c];
+        var last = lastLoc(t);
+        if (!last) return;
+        if (t.locations.length > 1) {
+          L.polyline(t.locations.map(function (l) { return [l.lat, l.lon]; }), {
+            color: color, weight: 2, opacity: 0.6,
+            dashArray: (t.status === "lost" || t.status === "left") ? "4 6" : null
+          }).addTo(tracksLayer);
+        }
+        var label = trackLabel(t);
+        var m = L.marker([last.lat, last.lon], {
+          icon: L.divIcon({ className: "", html: "<div class='plus " + c + "'>+</div>", iconSize: [24, 24], iconAnchor: [12, 12] })
+        }).addTo(tracksLayer);
+        m.bindTooltip(label, { direction: "top" });
+        m.bindPopup("<b>" + esc(label) + "</b><br><small>" + esc(t.last_text) + "</small>" +
+          "<br><small style='opacity:.6'>" + esc(CHANNEL_UK[t.channel] || t.channel) + "</small>");
+        if (t.heading && (t.status === "tracked" || t.status === "detected" || t.status === "approach")) {
+          var arrow = { N: [-0.35, 0], S: [0.35, 0], E: [0, 0.5], W: [0, -0.5] }[t.heading];
+          if (arrow) {
+            L.polyline([[last.lat, last.lon], [last.lat + arrow[0], last.lon + arrow[1]]], {
+              color: color, weight: 2, opacity: 0.8, dashArray: "2 6"
+            }).addTo(tracksLayer);
+          }
+        }
+      });
+    }
+  };
+}
+
+/* Резервна канвас-карта (працює навіть без Leaflet/CDN) */
+function initCanvas() {
+  document.getElementById("cbtns").style.display = "flex";
+  var wrap = document.getElementById("map");
+  var cv = document.createElement("canvas");
+  wrap.insertBefore(cv, wrap.firstChild);
+  var ctx = cv.getContext("2d");
+  var rings = (window.OBLAST_GEO && window.OBLAST_GEO.length) ? window.OBLAST_GEO : [FALLBACK_RING];
+  var K0 = Math.cos(48.3 * Math.PI / 180), SC = 2000, cx = 35.05, cy = 48.35;
+  var drag = null, state = null, alertOn = false;
+
+  function bounds() {
+    var minLa = 99, maxLa = -99, minLo = 99, maxLo = -99;
+    rings.forEach(function (r) { r.forEach(function (p) {
+      if (p[0] < minLa) minLa = p[0]; if (p[0] > maxLa) maxLa = p[0];
+      if (p[1] < minLo) minLo = p[1]; if (p[1] > maxLo) maxLo = p[1]; }); });
+    return [minLa, maxLa, minLo, maxLo];
+  }
+  function fit() {
+    var b = bounds(), r = wrap.getBoundingClientRect();
+    var w = Math.max(r.width, 100), h = Math.max(r.height, 100);
+    SC = Math.min(w / ((b[3] - b[2]) * K0), h / (b[1] - b[0])) * 0.88;
+    cx = (b[2] + b[3]) / 2; cy = (b[0] + b[1]) / 2;
+  }
+  function proj(lat, lon) {
+    return [
+      (lon - cx) * K0 * SC + cv.width / 2,
+      (cy - lat) * SC + cv.height / 2
+    ];
+  }
+  function draw() {
+    var dpr = window.devicePixelRatio || 1;
+    var light = document.body.classList.contains("light");
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = light ? "#f3f5f7" : "#11151c";
+    ctx.fillRect(0, 0, cv.width, cv.height);
+    var oc = alertOn ? "#e53935" : "#43a047";
+    ctx.lineWidth = 1.6 * dpr;
+    rings.forEach(function (r) {
+      ctx.beginPath();
+      r.forEach(function (p, i) {
+        var pt = proj(p[0], p[1]);
+        if (i === 0) ctx.moveTo(pt[0], pt[1]); else ctx.lineTo(pt[0], pt[1]);
+      });
+      ctx.closePath();
+      ctx.fillStyle = oc; ctx.globalAlpha = alertOn ? 0.22 : 0.10; ctx.fill(); ctx.globalAlpha = 1;
+      ctx.strokeStyle = oc; ctx.stroke();
+    });
+    if (state) (state.tracks || []).forEach(function (t) {
+      var c = threatColor(t), color = LINE_COLOR[c];
+      var last = lastLoc(t);
+      if (!last) return;
+      if (t.locations.length > 1) {
+        ctx.beginPath();
+        t.locations.forEach(function (l, i) {
+          var pt = proj(l.lat, l.lon);
+          if (i === 0) ctx.moveTo(pt[0], pt[1]); else ctx.lineTo(pt[0], pt[1]);
+        });
+        ctx.strokeStyle = color; ctx.globalAlpha = 0.6; ctx.lineWidth = 1.6 * dpr;
+        ctx.setLineDash((t.status === "lost" || t.status === "left") ? [4, 6] : []);
+        ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+      }
+      var pt = proj(last.lat, last.lon);
+      ctx.font = (22 * dpr) + "px 'Courier New', monospace";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.globalAlpha = c === "gray" ? 0.6 : 1;
+      ctx.fillStyle = color;
+      ctx.fillText("+", pt[0], pt[1]);
+      ctx.globalAlpha = 1;
+      ctx.font = (10 * dpr) + "px sans-serif";
+      ctx.fillStyle = light ? "#5f6368" : "#9aa0a6";
+      ctx.fillText(last.name || "", pt[0], pt[1] + 16 * dpr);
+    });
+    ctx.font = (10 * dpr) + "px sans-serif";
+    ctx.textAlign = "left";
+    ctx.fillStyle = light ? "#5f6368" : "#7f8790";
+    BIG_CITIES.forEach(function (p) {
+      var pt = proj(p.lat, p.lon);
+      ctx.fillRect(pt[0] - 2, pt[1] - 2, 4 * dpr, 4 * dpr);
+      ctx.fillText(p.name, pt[0] + 6, pt[1] + 3);
+    });
+  }
+  function resize() {
+    var r = wrap.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    cv.width = Math.max(r.width, 10) * dpr; cv.height = Math.max(r.height, 10) * dpr;
+    draw();
+  }
+  cv.addEventListener("pointerdown", function (e) { drag = { x: e.clientX, y: e.clientY, cx: cx, cy: cy }; });
+  window.addEventListener("pointermove", function (e) {
+    if (!drag) return;
+    cx = drag.cx - (e.clientX - drag.x) / (K0 * SC);
+    cy = drag.cy + (e.clientY - drag.y) / SC;
+    draw();
+  });
+  window.addEventListener("pointerup", function () { drag = null; });
+  wrap.addEventListener("wheel", function (e) {
+    e.preventDefault();
+    SC *= (e.deltaY < 0 ? 1.25 : 0.8);
+    draw();
+  }, { passive: false });
+  document.getElementById("zin").onclick = function () { SC *= 1.35; draw(); };
+  document.getElementById("zout").onclick = function () { SC /= 1.35; draw(); };
+  document.getElementById("theme-btn").onclick = function () {
+    document.body.classList.toggle("light");
+    document.getElementById("theme-btn").textContent = document.body.classList.contains("light") ? "🌙" : "☀";
+    draw();
+  };
+  window.addEventListener("resize", resize);
+  fit(); resize();
+  return {
+    render: function (s, a) { state = s; alertOn = a; draw(); }
+  };
+}
+
+/* Джерело даних: застосунок (bridge) -> Termux-сервер (state.json) -> демо */
+function parseSafe(txt) {
+  try { var s = JSON.parse(txt); return (s && Array.isArray(s.tracks)) ? s : null; }
+  catch (e) { return null; }
+}
+function printErr(msg) {
+  var m = document.getElementById("map");
+  m.classList.add("error"); m.setAttribute("data-err", msg);
+}
+async function getState() {
+  if (window.Android && typeof window.Android.getState === "function") {
+    var s = parseSafe(window.Android.getState());
+    window.__dataMode = s ? "застосунок" : "застосунок (дані недоступні → демо)";
+    return s || demoState();
+  }
+  if (location.protocol === "http:" || location.protocol === "https:") {
+    try {
+      var r = await fetch("state.json?_=" + Date.now(), { cache: "no-store" });
+      var s2 = parseSafe(await r.text());
+      window.__dataMode = s2 ? "сервер Termux" : "сервер (дані недоступні → демо)";
+      return s2 || demoState();
+    } catch (e) { window.__dataMode = "сервер (дані недоступні → демо)"; return demoState(); }
+  }
+  window.__dataMode = "демо";
+  return demoState();
+}
+
+async function tick() {
+  try { renderState(await getState()); }
+  catch (e) { printErr("Помилка оновлення: " + e.message); }
+}
+
+function demoState() {
+  var now = Math.floor(Date.now() / 1000);
+  return {
+    updated: now,
+    alerts: { state: "on", updated: now },
     tracks: [
-      { id: "d1", channel: "eyes_everywhere_dnipro", type: "jet", status: "lost", count: 1,
-        heading: "S", pattern: false, last_text: "Реактив, далі вздовж траси на Нікополь. Без фіксації",
-        last_update: Math.floor(Date.now() / 1000) - 300,
+      { id: "d1", channel: "eyes_everywhere_dnipro", type: "jet", status: "approach", count: 1,
+        heading: "S", pattern: false, last_text: "Реактив, далі вздовж траси на Нікополь",
+        last_update: now - 300,
         locations: [
           { name: "Вакулове", lat: 47.9866, lon: 33.7716, t: 0 },
           { name: "Кривий Ріг", lat: 47.9105, lon: 33.3918, t: 60 },
           { name: "Нікополь", lat: 47.5716, lon: 34.4003, t: 120 }
         ] },
       { id: "d2", channel: "dnepr_nagladach", type: "rbpla", status: "loiter", count: 1,
-        heading: "W", pattern: true, last_text: "1х РБпЛА Соленое, наматывает круги в треугольнике",
-        last_update: Math.floor(Date.now() / 1000) - 60,
+        heading: "W", pattern: true, last_text: "1х РБпЛА Соленое, наматывает круги",
+        last_update: now - 60,
         locations: [
           { name: "Солоне", lat: 48.3546, lon: 35.3064, t: 0 },
           { name: "Військове", lat: 48.4287, lon: 35.5478, t: 60 }
         ] },
       { id: "d3", channel: "PmSDnepra", type: "ціль", status: "unknown", count: null,
         heading: null, pattern: false, last_text: "Малософіївка",
-        last_update: Math.floor(Date.now() / 1000) - 30,
+        last_update: now - 30,
         locations: [{ name: "Софіївка", lat: 48.1928, lon: 34.1150, t: 0 }] }
     ],
     feed: [
-      { channel: "eyes_everywhere_dnipro", time: Math.floor(Date.now() / 1000) - 600, kind: "target", text: "Реактив на Кривий Ріг зі сходу" },
-      { channel: "eyes_everywhere_dnipro", time: Math.floor(Date.now() / 1000) - 560, kind: "target", text: "Проходить с.Вакулове" },
-      { channel: "dnepr_nagladach", time: Math.floor(Date.now() / 1000) - 300, kind: "target", text: "1х РБпЛА Соленое\n1х РБпЛА Войсковое" },
-      { channel: "PmSDnepra", time: Math.floor(Date.now() / 1000) - 120, kind: "noise", text: "Тихой ночи ❤" },
-      { channel: "eyes_everywhere_dnipro", time: Math.floor(Date.now() / 1000) - 60, kind: "alert_echo", text: "🔴 Дніпровський район — повітряна тривога, червоний рівень" }
+      { channel: "eyes_everywhere_dnipro", time: now - 600, kind: "target", text: "Реактив на Кривий Ріг зі сходу" },
+      { channel: "eyes_everywhere_dnipro", time: now - 560, kind: "target", text: "Проходить с.Вакулове" },
+      { channel: "dnepr_nagladach", time: now - 300, kind: "target", text: "1х РБпЛА Соленое\n1х РБпЛА Войсковое" },
+      { channel: "PmSDnepra", time: now - 120, kind: "noise", text: "Тихой ночи ❤" },
+      { channel: "eyes_everywhere_dnipro", time: now - 60, kind: "alert_echo", text: "🔴 Дніпровський район — повітряна тривога" }
     ]
   };
 }
 
-function tick() {
-  let state;
-  if (window.Android && window.Android.getState) {
-    try {
-      state = JSON.parse(window.Android.getState());
-    } catch (e) {
-      state = demoState();
-    }
-  } else {
-    state = demoState();
-  }
-  render(state);
+/* Старт */
+async function boot() {
+  if (window.L) { start(); return; }
+  loadWithFallback(LEAFLET_BASES, "leaflet.css", "leaflet.js",
+    function () { start(); },
+    function () { printErr("Leaflet не завантажився (CDN недоступні) — увімкнено резервну карту"); start(); }
+  );
 }
-
-tick();
-setInterval(tick, 5000);
+function start() { mapApi = window.L ? initLeaflet() : initCanvas(); tick(); setInterval(tick, 4000); }
+boot();
 </script>
 </body>
 </html>
